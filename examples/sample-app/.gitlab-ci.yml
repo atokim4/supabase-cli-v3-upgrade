@@ -1,0 +1,6 @@
+deploy_db:
+  stage: deploy
+  image: node:22
+  script:
+    - npx supabase@latest db push --db-url "$DATABASE_URL"
+    - npx supabase@latest migration list --db-url "$DATABASE_URL"

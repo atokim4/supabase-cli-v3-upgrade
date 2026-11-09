@@ -1,0 +1,38 @@
+name: Deploy Supabase
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link project
+        run: supabase link --project-ref "$PROJECT_REF"
+
+      - name: Push migrations
+        run: supabase db push --linked --include-all
+
+      - name: Generate types
+        run: |
+          supabase gen types typescript --project-id "$PROJECT_REF" \
+            --schema public > src/types/database.ts
+
+      - name: Deploy functions and secrets
+        run: |
+          supabase functions deploy --project-ref "$PROJECT_REF"
+          supabase secrets set --env-file supabase/.env.production
+          echo y | supabase config push
+
+      - name: Release script
+        run: npm run release

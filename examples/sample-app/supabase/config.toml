@@ -1,0 +1,29 @@
+project_id = "sample-app"
+
+[api]
+enabled = true
+port = 54321
+
+[db]
+port = 54322
+
+[inbucket]
+enabled = true
+port = 54324
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+
+[auth.email]
+enable_signup = true
+
+[auth.sms]
+enable_signup = false
+enable_confirmations = false
+
+[remotes.production]
+project_id = "abcdefghijklmnopqrst"
+
+[remotes.production.auth]
+site_url = "https://app.example.com"

@@ -1,0 +1,48 @@
+name: supabase-cli-v3-upgrade
+description: Find Supabase CLI v2 usage that breaks on CLI v3 in workflows, scripts and config.toml, with SARIF output and optional safe fixes
+author: Sunnatulla E.
+branding:
+  icon: arrow-up-circle
+  color: green
+
+inputs:
+  path:
+    description: Folder to scan, relative to the repository root.
+    required: false
+    default: .
+  fail-on:
+    description: "Fail the step when a finding at this level or above remains: error, warning, note or none."
+    required: false
+    default: error
+  format:
+    description: "sarif writes a SARIF 2.1.0 file for code scanning plus the job summary; markdown writes only the job summary."
+    required: false
+    default: sarif
+  exclude:
+    description: Comma- or newline-separated rule ids to skip.
+    required: false
+    default: ""
+  fix:
+    description: "true rewrites the safe cases in the checkout and prints the diff (commit them in a later step); the report then shows what is left."
+    required: false
+    default: "false"
+  sarif-file:
+    description: Where to write the SARIF file, relative to the repository root.
+    required: false
+    default: supabase-cli-v3.sarif
+
+outputs:
+  findings-count:
+    description: Number of findings left (errors, warnings and notes).
+  errors-count:
+    description: Number of error-level findings left.
+  fixable-count:
+    description: Number of findings left that fix would rewrite.
+  fixed-count:
+    description: Number of findings fix rewrote (0 unless fix is true).
+  sarif-file:
+    description: Path of the SARIF file, relative to the repository root. Empty when format is markdown.
+
+runs:
+  using: node24
+  main: action/index.mjs

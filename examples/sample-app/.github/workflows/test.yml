@@ -1,0 +1,15 @@
+name: Test
+
+on: pull_request
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.98.0
+      - run: supabase start
+      - run: supabase db push
+      - run: supabase test db

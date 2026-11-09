@@ -1,0 +1,44 @@
+{
+  "name": "supabase-cli-v3-upgrade",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Finds Supabase CLI v2 usage that breaks on CLI v3 in CI workflows, scripts, config.toml and agent instructions, and rewrites the safe cases with --fix.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Sunnatulla E.",
+  "bin": {
+    "supabase-v3-check": "skills/supabase-cli-v3-upgrade/scripts/v3check.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node22 --outfile=skills/supabase-cli-v3-upgrade/scripts/v3check.mjs --banner:js=\"#!/usr/bin/env node\" && esbuild src/action/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=action/index.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run build && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  },
+  "files": [
+    "skills/supabase-cli-v3-upgrade/scripts/v3check.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "supabase",
+    "supabase-cli",
+    "ci",
+    "github-actions",
+    "codemod",
+    "migration"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atokim4/supabase-cli-v3-upgrade.git"
+  }
+}

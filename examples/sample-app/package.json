@@ -1,0 +1,13 @@
+{
+  "name": "sample-app",
+  "private": true,
+  "scripts": {
+    "db:types": "supabase gen types typescript --local > src/types/database.ts",
+    "db:reset": "supabase db reset",
+    "db:push": "supabase db push",
+    "release": "bash scripts/release.sh"
+  },
+  "devDependencies": {
+    "supabase": "^2.98.0"
+  }
+}
