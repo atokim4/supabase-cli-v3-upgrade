@@ -1,14 +1,12 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import { mkdirSync, readFileSync as readFileSync3, realpathSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname, join as join4, resolve } from "node:path";
+import { mkdirSync, readFileSync as readFileSync2, realpathSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname, join as join3, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 // src/fix.ts
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
 var overlaps = (a, b) => {
   if (a.start === a.end || b.start === b.end) return a.start > b.start && a.start < b.end || b.start > a.start && b.start < a.end;
   return a.start < b.end && b.start < a.end;
@@ -44,9 +42,6 @@ function applyEdits(text, edits) {
   let out = text;
   for (const e of sorted) out = out.slice(0, e.start) + e.text + out.slice(e.end);
   return out;
-}
-function writeFixes(root, fixes) {
-  for (const f of fixes) writeFileSync(join(root, f.file), f.after);
 }
 function unifiedDiff(file, before, after, context = 3) {
   const a = before.split("\n");
@@ -109,9 +104,239 @@ function diffLines(a, b) {
   return ops;
 }
 
-// src/scan.ts
-import { existsSync, readFileSync as readFileSync2, statSync as statSync2 } from "node:fs";
-import { join as join3 } from "node:path";
+// src/fs-repo.ts
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+// src/sources.ts
+var SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", "build", ".next", ".nuxt", ".output", "vendor", "coverage", ".turbo", ".vercel", ".netlify", ".venv", "target"]);
+var MAX_BYTES = 1024 * 1024;
+var MAX_FILES = 2e4;
+var AGENT_DOCS = /* @__PURE__ */ new Set(["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".cursorrules", ".windsurfrules", ".clinerules", "copilot-instructions.md"]);
+var CI_OTHER = /* @__PURE__ */ new Set(["bitbucket-pipelines.yml", "azure-pipelines.yml"]);
+function classify(path) {
+  const slash = path.lastIndexOf("/");
+  const name = path.slice(slash + 1);
+  const dir = slash === -1 ? "." : path.slice(0, slash);
+  if (/(^|\/)\.github\/workflows$/.test(dir) && /\.ya?ml$/.test(name)) return "workflow";
+  if (/(^|\/)\.github\/actions(\/|$)/.test(dir) && /^action\.ya?ml$/.test(name)) return "workflow";
+  if (name === ".gitlab-ci.yml" || /\.gitlab-ci\.ya?ml$/.test(name)) return "gitlab";
+  if (CI_OTHER.has(name) || /(^|\/)\.circleci$/.test(dir) && name === "config.yml") return "ci-other";
+  if (name === "package.json") return "package";
+  if (/\.(sh|bash)$/.test(name)) return "shell";
+  if (name === "Makefile" || name === "makefile" || name === "GNUmakefile" || name.endsWith(".mk")) return "makefile";
+  if (name === "Dockerfile" || /^Dockerfile\./.test(name) || name.endsWith(".Dockerfile")) return "dockerfile";
+  if (/(^|\/)supabase$/.test(dir) && name === "config.toml") return "config-toml";
+  if (/(^|\/)supabase$/.test(dir) && name === "config.json") return "config-json";
+  if (/^\.env(\.[\w-]+)*$/.test(name) && !/\.(example|sample|template|dist|defaults)$/.test(name)) return "env";
+  if (AGENT_DOCS.has(name)) return "agent-doc";
+  if (/(^|\/)\.cursor\/rules(\/|$)/.test(dir) && /\.mdc?$/.test(name)) return "agent-doc";
+  if (/(^|\/)\.claude\/(commands|agents)(\/|$)/.test(dir) && name.endsWith(".md")) return "agent-doc";
+  return void 0;
+}
+var CI_KINDS = /* @__PURE__ */ new Set(["workflow", "gitlab", "ci-other"]);
+var isCi = (f) => CI_KINDS.has(f.kind);
+var YAML_SHELL_KEY = /^(\s*)(?:-\s+)?(run|script|before_script|after_script|command):[ \t]*(.*)$/;
+function yamlShellSpans(text) {
+  const spans = [];
+  const lines = text.split("\n");
+  const offsets = [];
+  let at = 0;
+  for (const l of lines) {
+    offsets.push(at);
+    at += l.length + 1;
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const m = YAML_SHELL_KEY.exec(lines[i]);
+    if (!m) continue;
+    const indent = m[1].length;
+    const value = m[3];
+    const valueStart = offsets[i] + lines[i].length - value.length;
+    if (value && !/^[|>][-+0-9]*\s*(#.*)?$/.test(value)) {
+      const q = value[0];
+      if ((q === '"' || q === "'") && value.trimEnd().endsWith(q) && value.trimEnd().length > 1) {
+        spans.push({ start: valueStart + 1, end: valueStart + value.trimEnd().length - 1 });
+      } else spans.push({ start: valueStart, end: offsets[i] + lines[i].length });
+    }
+    let j = i + 1;
+    for (; j < lines.length; j++) {
+      const l = lines[j];
+      if (l.trim() === "") continue;
+      if (l.length - l.trimStart().length <= indent) break;
+    }
+    if (j > i + 1) {
+      const items = lines.slice(i + 1, j).filter((l) => l.trim() !== "");
+      if (items.length > 0 && /^\s*-\s/.test(items[0])) {
+        for (let k = i + 1; k < j; k++) {
+          const item = /^(\s*-\s+)(.*?)\s*$/.exec(lines[k]);
+          if (!item || !item[2]) continue;
+          const s = offsets[k] + item[1].length;
+          const body = item[2];
+          const quoted = body.length > 1 && (body[0] === '"' || body[0] === "'") && body.endsWith(body[0]);
+          spans.push(quoted ? { start: s + 1, end: s + body.length - 1 } : { start: s, end: s + body.length });
+        }
+      } else {
+        spans.push({ start: offsets[i + 1], end: offsets[j - 1] + lines[j - 1].length });
+      }
+      i = j - 1;
+    }
+  }
+  return spans;
+}
+function packageScriptSpans(text) {
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  const scripts = json.scripts && typeof json.scripts === "object" ? json.scripts : {};
+  const scriptsAt = text.search(/"scripts"\s*:\s*\{/);
+  if (scriptsAt === -1) return [];
+  const spans = [];
+  let cursor = scriptsAt;
+  for (const name of Object.keys(scripts)) {
+    if (typeof scripts[name] !== "string") continue;
+    const key = new RegExp(`"${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\s*:\\s*"`, "g");
+    key.lastIndex = cursor;
+    const m = key.exec(text);
+    if (!m) continue;
+    const start = m.index + m[0].length;
+    let end = start;
+    while (end < text.length && text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+    spans.push({ name, start, end });
+    cursor = end;
+  }
+  return spans;
+}
+function markdownCodeSpans(text) {
+  const spans = [];
+  const fence = /^([ \t]*)(`{3,}|~{3,})[^\n]*\n([\s\S]*?)^\1\2[ \t]*$/gm;
+  const fenced = [];
+  for (let m = fence.exec(text); m; m = fence.exec(text)) {
+    const start = m.index + m[0].indexOf("\n") + 1;
+    const span = { start, end: start + m[3].length };
+    spans.push(span);
+    fenced.push({ start: m.index, end: m.index + m[0].length });
+  }
+  const inline = /`([^`\n]+)`/g;
+  for (let m = inline.exec(text); m; m = inline.exec(text)) {
+    const at = m.index;
+    if (fenced.some((f) => at >= f.start && at < f.end)) continue;
+    spans.push({ start: at + 1, end: at + 1 + m[1].length });
+  }
+  return spans.sort((a, b) => a.start - b.start);
+}
+var maskJsonEscapes = (text) => text.replace(/\\(["\\])/g, " $1");
+function regionsOf(file, ciScripts, ciFiles) {
+  const whole = (context) => [{ file, start: 0, end: file.text.length, context, lexText: file.text }];
+  switch (file.kind) {
+    case "workflow":
+    case "gitlab":
+    case "ci-other":
+      return yamlShellSpans(file.text).map((s) => ({ file, ...s, context: "ci", lexText: file.text }));
+    case "package": {
+      const lexText = maskJsonEscapes(file.text);
+      return packageScriptSpans(file.text).map((s) => ({
+        file,
+        start: s.start,
+        end: s.end,
+        script: s.name,
+        context: ciScripts.has(s.name) || ciFiles.has(file.path) ? "ci" : "script",
+        lexText
+      }));
+    }
+    case "shell":
+    case "makefile":
+    case "dockerfile":
+      return whole(ciFiles.has(file.path) ? "ci" : "script");
+    case "agent-doc":
+      return markdownCodeSpans(file.text).map((s) => ({ file, ...s, context: "agent", lexText: file.text }));
+    default:
+      return [];
+  }
+}
+var SCRIPT_RUN = /\b(?:npm\s+run(?:-script)?|pnpm(?:\s+run)?|yarn(?:\s+run)?|bun\s+run)\s+([\w:.@/-]+)/g;
+var SHELL_FILE = /(?:^|[\s"'=])(?:\.\/)?([\w./-]+\.(?:sh|bash))\b/g;
+var PNPM_BUILTINS = /* @__PURE__ */ new Set(["install", "i", "add", "exec", "dlx", "ci", "test", "run", "x", "build", "--filter", "-r"]);
+function ciReach(files) {
+  const scripts = /* @__PURE__ */ new Set();
+  const reached = /* @__PURE__ */ new Set();
+  const shellFiles = files.filter((f) => f.kind === "shell");
+  const makefiles = files.filter((f) => f.kind === "makefile");
+  const scan2 = (text) => {
+    for (const m of text.matchAll(SCRIPT_RUN)) if (!PNPM_BUILTINS.has(m[1])) scripts.add(m[1]);
+    for (const m of text.matchAll(SHELL_FILE)) {
+      const ref = m[1].replace(/^\.\//, "");
+      for (const f of shellFiles) if (f.path === ref || f.path.endsWith(`/${ref}`)) reached.add(f.path);
+    }
+    if (/(^|[\s;&|])make(\s|$)/m.test(text)) for (const f of makefiles) reached.add(f.path);
+  };
+  for (const f of files.filter(isCi)) scan2(f.text);
+  for (let changed = true; changed; ) {
+    const before = scripts.size + reached.size;
+    for (const f of files) {
+      if (f.kind === "package") {
+        for (const s of packageScriptSpans(f.text)) if (scripts.has(s.name)) scan2(f.text.slice(s.start, s.end));
+      } else if (reached.has(f.path)) scan2(f.text);
+    }
+    changed = scripts.size + reached.size !== before;
+  }
+  return { scripts, files: reached };
+}
+function lineOf(text, offset) {
+  let line = 1;
+  for (let i = 0; i < offset && i < text.length; i++) if (text[i] === "\n") line++;
+  return line;
+}
+
+// src/fs-repo.ts
+function loadRepo(root) {
+  const files = [];
+  const paths = [];
+  let truncated = false;
+  const walk = (dir, rel) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (paths.length >= MAX_FILES) {
+        truncated = true;
+        return;
+      }
+      const relPath = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        if (!SKIP_DIRS.has(e.name)) walk(join(dir, e.name), relPath);
+        continue;
+      }
+      if (!e.isFile()) continue;
+      paths.push(relPath);
+      const kind = classify(relPath);
+      if (!kind) continue;
+      const full = join(dir, e.name);
+      if (statSync(full).size > MAX_BYTES) continue;
+      files.push({ path: relPath, text: readFileSync(full, "utf8"), kind });
+    }
+  };
+  walk(root, "");
+  return { root, files, paths, truncated };
+}
+function readText(path) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return void 0;
+  }
+}
+function isDirectory(path) {
+  return existsSync(path) && statSync(path).isDirectory();
+}
+function writeFixes(root, fixes) {
+  for (const f of fixes) writeFileSync(join(root, f.file), f.after);
+}
 
 // src/rules.ts
 var GUIDE_URL = "https://supabase.com/docs/guides/local-development/cli/migrating-to-v3";
@@ -664,222 +889,6 @@ function parseCommand(args) {
     positionals.push({ value: t.value, index: i });
   }
   return { path, pathIndex, flags, positionals };
-}
-
-// src/sources.ts
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join as join2, posix } from "node:path";
-var SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", "build", ".next", ".nuxt", ".output", "vendor", "coverage", ".turbo", ".vercel", ".netlify", ".venv", "target"]);
-var MAX_BYTES = 1024 * 1024;
-var MAX_FILES = 2e4;
-var AGENT_DOCS = /* @__PURE__ */ new Set(["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".cursorrules", ".windsurfrules", ".clinerules", "copilot-instructions.md"]);
-var CI_OTHER = /* @__PURE__ */ new Set(["bitbucket-pipelines.yml", "azure-pipelines.yml"]);
-function classify(path) {
-  const name = posix.basename(path);
-  const dir = posix.dirname(path);
-  if (/(^|\/)\.github\/workflows$/.test(dir) && /\.ya?ml$/.test(name)) return "workflow";
-  if (/(^|\/)\.github\/actions(\/|$)/.test(dir) && /^action\.ya?ml$/.test(name)) return "workflow";
-  if (name === ".gitlab-ci.yml" || /\.gitlab-ci\.ya?ml$/.test(name)) return "gitlab";
-  if (CI_OTHER.has(name) || /(^|\/)\.circleci$/.test(dir) && name === "config.yml") return "ci-other";
-  if (name === "package.json") return "package";
-  if (/\.(sh|bash)$/.test(name)) return "shell";
-  if (name === "Makefile" || name === "makefile" || name === "GNUmakefile" || name.endsWith(".mk")) return "makefile";
-  if (name === "Dockerfile" || /^Dockerfile\./.test(name) || name.endsWith(".Dockerfile")) return "dockerfile";
-  if (/(^|\/)supabase$/.test(dir) && name === "config.toml") return "config-toml";
-  if (/(^|\/)supabase$/.test(dir) && name === "config.json") return "config-json";
-  if (/^\.env(\.[\w-]+)*$/.test(name) && !/\.(example|sample|template|dist|defaults)$/.test(name)) return "env";
-  if (AGENT_DOCS.has(name)) return "agent-doc";
-  if (/(^|\/)\.cursor\/rules(\/|$)/.test(dir) && /\.mdc?$/.test(name)) return "agent-doc";
-  if (/(^|\/)\.claude\/(commands|agents)(\/|$)/.test(dir) && name.endsWith(".md")) return "agent-doc";
-  return void 0;
-}
-function loadRepo(root) {
-  const files = [];
-  const paths = [];
-  let truncated = false;
-  const walk = (dir, rel) => {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (paths.length >= MAX_FILES) {
-        truncated = true;
-        return;
-      }
-      const relPath = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) {
-        if (!SKIP_DIRS.has(e.name)) walk(join2(dir, e.name), relPath);
-        continue;
-      }
-      if (!e.isFile()) continue;
-      paths.push(relPath);
-      const kind = classify(relPath);
-      if (!kind) continue;
-      const full = join2(dir, e.name);
-      if (statSync(full).size > MAX_BYTES) continue;
-      files.push({ path: relPath, text: readFileSync(full, "utf8"), kind });
-    }
-  };
-  walk(root, "");
-  return { root, files, paths, truncated };
-}
-var CI_KINDS = /* @__PURE__ */ new Set(["workflow", "gitlab", "ci-other"]);
-var isCi = (f) => CI_KINDS.has(f.kind);
-var YAML_SHELL_KEY = /^(\s*)(?:-\s+)?(run|script|before_script|after_script|command):[ \t]*(.*)$/;
-function yamlShellSpans(text) {
-  const spans = [];
-  const lines = text.split("\n");
-  const offsets = [];
-  let at = 0;
-  for (const l of lines) {
-    offsets.push(at);
-    at += l.length + 1;
-  }
-  for (let i = 0; i < lines.length; i++) {
-    const m = YAML_SHELL_KEY.exec(lines[i]);
-    if (!m) continue;
-    const indent = m[1].length;
-    const value = m[3];
-    const valueStart = offsets[i] + lines[i].length - value.length;
-    if (value && !/^[|>][-+0-9]*\s*(#.*)?$/.test(value)) {
-      const q = value[0];
-      if ((q === '"' || q === "'") && value.trimEnd().endsWith(q) && value.trimEnd().length > 1) {
-        spans.push({ start: valueStart + 1, end: valueStart + value.trimEnd().length - 1 });
-      } else spans.push({ start: valueStart, end: offsets[i] + lines[i].length });
-    }
-    let j = i + 1;
-    for (; j < lines.length; j++) {
-      const l = lines[j];
-      if (l.trim() === "") continue;
-      if (l.length - l.trimStart().length <= indent) break;
-    }
-    if (j > i + 1) {
-      const items = lines.slice(i + 1, j).filter((l) => l.trim() !== "");
-      if (items.length > 0 && /^\s*-\s/.test(items[0])) {
-        for (let k = i + 1; k < j; k++) {
-          const item = /^(\s*-\s+)(.*?)\s*$/.exec(lines[k]);
-          if (!item || !item[2]) continue;
-          const s = offsets[k] + item[1].length;
-          const body = item[2];
-          const quoted = body.length > 1 && (body[0] === '"' || body[0] === "'") && body.endsWith(body[0]);
-          spans.push(quoted ? { start: s + 1, end: s + body.length - 1 } : { start: s, end: s + body.length });
-        }
-      } else {
-        spans.push({ start: offsets[i + 1], end: offsets[j - 1] + lines[j - 1].length });
-      }
-      i = j - 1;
-    }
-  }
-  return spans;
-}
-function packageScriptSpans(text) {
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    return [];
-  }
-  const scripts = json.scripts && typeof json.scripts === "object" ? json.scripts : {};
-  const scriptsAt = text.search(/"scripts"\s*:\s*\{/);
-  if (scriptsAt === -1) return [];
-  const spans = [];
-  let cursor = scriptsAt;
-  for (const name of Object.keys(scripts)) {
-    if (typeof scripts[name] !== "string") continue;
-    const key = new RegExp(`"${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\s*:\\s*"`, "g");
-    key.lastIndex = cursor;
-    const m = key.exec(text);
-    if (!m) continue;
-    const start = m.index + m[0].length;
-    let end = start;
-    while (end < text.length && text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
-    spans.push({ name, start, end });
-    cursor = end;
-  }
-  return spans;
-}
-function markdownCodeSpans(text) {
-  const spans = [];
-  const fence = /^([ \t]*)(`{3,}|~{3,})[^\n]*\n([\s\S]*?)^\1\2[ \t]*$/gm;
-  const fenced = [];
-  for (let m = fence.exec(text); m; m = fence.exec(text)) {
-    const start = m.index + m[0].indexOf("\n") + 1;
-    const span = { start, end: start + m[3].length };
-    spans.push(span);
-    fenced.push({ start: m.index, end: m.index + m[0].length });
-  }
-  const inline = /`([^`\n]+)`/g;
-  for (let m = inline.exec(text); m; m = inline.exec(text)) {
-    const at = m.index;
-    if (fenced.some((f) => at >= f.start && at < f.end)) continue;
-    spans.push({ start: at + 1, end: at + 1 + m[1].length });
-  }
-  return spans.sort((a, b) => a.start - b.start);
-}
-var maskJsonEscapes = (text) => text.replace(/\\(["\\])/g, " $1");
-function regionsOf(file, ciScripts, ciFiles) {
-  const whole = (context) => [{ file, start: 0, end: file.text.length, context, lexText: file.text }];
-  switch (file.kind) {
-    case "workflow":
-    case "gitlab":
-    case "ci-other":
-      return yamlShellSpans(file.text).map((s) => ({ file, ...s, context: "ci", lexText: file.text }));
-    case "package": {
-      const lexText = maskJsonEscapes(file.text);
-      return packageScriptSpans(file.text).map((s) => ({
-        file,
-        start: s.start,
-        end: s.end,
-        script: s.name,
-        context: ciScripts.has(s.name) || ciFiles.has(file.path) ? "ci" : "script",
-        lexText
-      }));
-    }
-    case "shell":
-    case "makefile":
-    case "dockerfile":
-      return whole(ciFiles.has(file.path) ? "ci" : "script");
-    case "agent-doc":
-      return markdownCodeSpans(file.text).map((s) => ({ file, ...s, context: "agent", lexText: file.text }));
-    default:
-      return [];
-  }
-}
-var SCRIPT_RUN = /\b(?:npm\s+run(?:-script)?|pnpm(?:\s+run)?|yarn(?:\s+run)?|bun\s+run)\s+([\w:.@/-]+)/g;
-var SHELL_FILE = /(?:^|[\s"'=])(?:\.\/)?([\w./-]+\.(?:sh|bash))\b/g;
-var PNPM_BUILTINS = /* @__PURE__ */ new Set(["install", "i", "add", "exec", "dlx", "ci", "test", "run", "x", "build", "--filter", "-r"]);
-function ciReach(files) {
-  const scripts = /* @__PURE__ */ new Set();
-  const reached = /* @__PURE__ */ new Set();
-  const shellFiles = files.filter((f) => f.kind === "shell");
-  const makefiles = files.filter((f) => f.kind === "makefile");
-  const scan2 = (text) => {
-    for (const m of text.matchAll(SCRIPT_RUN)) if (!PNPM_BUILTINS.has(m[1])) scripts.add(m[1]);
-    for (const m of text.matchAll(SHELL_FILE)) {
-      const ref = m[1].replace(/^\.\//, "");
-      for (const f of shellFiles) if (f.path === ref || f.path.endsWith(`/${ref}`)) reached.add(f.path);
-    }
-    if (/(^|[\s;&|])make(\s|$)/m.test(text)) for (const f of makefiles) reached.add(f.path);
-  };
-  for (const f of files.filter(isCi)) scan2(f.text);
-  for (let changed = true; changed; ) {
-    const before = scripts.size + reached.size;
-    for (const f of files) {
-      if (f.kind === "package") {
-        for (const s of packageScriptSpans(f.text)) if (scripts.has(s.name)) scan2(f.text.slice(s.start, s.end));
-      } else if (reached.has(f.path)) scan2(f.text);
-    }
-    changed = scripts.size + reached.size !== before;
-  }
-  return { scripts, files: reached };
-}
-function lineOf(text, offset) {
-  let line = 1;
-  for (let i = 0; i < offset && i < text.length; i++) if (text[i] === "\n") line++;
-  return line;
 }
 
 // src/checks/commands.ts
@@ -1450,12 +1459,9 @@ var setsExperimental = (f) => new RegExp(`(^|[\\s"'])SUPABASE_EXPERIMENTAL[ \\t]
 // src/types.ts
 var SEVERITY_ORDER = { error: 3, warning: 2, note: 1 };
 
-// src/scan.ts
-function isDirectory(path) {
-  return existsSync(path) && statSync2(path).isDirectory();
-}
-function scan(root, skip = []) {
-  const repo = loadRepo(root);
+// src/engine.ts
+function scanRepo(repo, read, skip = []) {
+  const root = repo.root;
   const reach = ciReach(repo.files);
   const regions = repo.files.flatMap((f) => regionsOf(f, reach.scripts, reach.files));
   const commands = /* @__PURE__ */ new Map();
@@ -1482,7 +1488,7 @@ function scan(root, skip = []) {
     ...checkRenames(files),
     ...checkEnvFiles(files),
     ...checkFunctionImportMaps(repo.paths),
-    ...checkSetupCli(files, lockfilePin(repo.paths, (p) => readText(join3(root, p)))),
+    ...checkSetupCli(files, lockfilePin(repo.paths, read)),
     ...checkProjectIdTarget(files, commands)
   ].filter((f) => !skip.includes(f.rule));
   const order = new Map(RULES.map((r, i) => [r.id, i]));
@@ -1497,13 +1503,6 @@ function scan(root, skip = []) {
     ciReached: [...reach.files, ...[...reach.scripts].map((s) => `npm script "${s}"`)],
     truncated: repo.truncated
   };
-}
-function readText(path) {
-  try {
-    return readFileSync2(path, "utf8");
-  } catch {
-    return void 0;
-  }
 }
 function failsAt(findings, level) {
   return findings.some((f) => SEVERITY_ORDER[f.severity] >= SEVERITY_ORDER[level]);
@@ -1541,7 +1540,7 @@ function markdownReport(result, options = {}) {
 }
 
 // src/version.ts
-var VERSION = "0.1.0";
+var VERSION = "0.1.1";
 var TOOL_NAME = "supabase-cli-v3-upgrade";
 var REPO_URL = "https://github.com/atokim4/supabase-cli-v3-upgrade";
 
@@ -1605,6 +1604,14 @@ function toSarif(result, pathPrefix = "") {
 
 // src/report/text.ts
 import { relative } from "node:path";
+
+// src/scan.ts
+import { join as join2 } from "node:path";
+function scan(root, skip = []) {
+  return scanRepo(loadRepo(root), (p) => readText(join2(root, p)), skip);
+}
+
+// src/report/text.ts
 var COLORS = { error: "\x1B[31m", warning: "\x1B[33m", note: "\x1B[36m" };
 var RESET = "\x1B[0m";
 var DIM = "\x1B[2m";
@@ -1693,7 +1700,7 @@ function render(result, format, color) {
 }
 function readAll(root, files) {
   const texts = /* @__PURE__ */ new Map();
-  for (const f of files) texts.set(f, readFileSync3(join4(root, f), "utf8"));
+  for (const f of files) texts.set(f, readFileSync2(join3(root, f), "utf8"));
   return texts;
 }
 function diffText(fixes) {

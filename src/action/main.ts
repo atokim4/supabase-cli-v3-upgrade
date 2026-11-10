@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { planFixes, unifiedDiff, writeFixes } from "../fix.ts";
+import { planFixes, unifiedDiff } from "../fix.ts";
+import { writeFixes } from "../fs-repo.ts";
 import { markdownReport } from "../report/markdown.ts";
 import { toSarif } from "../report/sarif.ts";
 import { textReport } from "../report/text.ts";

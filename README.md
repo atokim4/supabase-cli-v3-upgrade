@@ -6,6 +6,8 @@
 npx github:atokim4/supabase-cli-v3-upgrade --fix
 ```
 
+No install: [check a public repo in the browser](https://upgrade-check-2026.netlify.app) (same engine, runs in the tab, reads up to 60 files; the CLI reads everything).
+
 Supabase CLI v3.0.0 came out on 2026-11-02, and npm, Homebrew, Scoop and `supabase/setup-cli` now install it
 by default. A pipeline that installs `latest` already runs v3. Its database commands now target the local stack
 unless you pass `--remote`, every hosted change asks for confirmation (and fails in CI without `--yes`), and an

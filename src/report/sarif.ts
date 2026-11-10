@@ -1,5 +1,5 @@
 import { guideLink } from "../rules.ts";
-import type { ScanResult } from "../scan.ts";
+import type { ScanResult } from "../engine.ts";
 import type { RuleMeta, Severity } from "../types.ts";
 import { REPO_URL, TOOL_NAME, VERSION } from "../version.ts";
 

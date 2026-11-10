@@ -1,5 +1,3 @@
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
 import type { Edit, Finding } from "./types.ts";
 
 export interface FileFix {
@@ -58,10 +56,6 @@ export function applyEdits(text: string, edits: readonly Edit[]): string {
   let out = text;
   for (const e of sorted) out = out.slice(0, e.start) + e.text + out.slice(e.end);
   return out;
-}
-
-export function writeFixes(root: string, fixes: readonly FileFix[]): void {
-  for (const f of fixes) writeFileSync(join(root, f.file), f.after);
 }
 
 /** A unified diff (3 lines of context) of one file. */

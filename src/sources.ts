@@ -1,17 +1,16 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, posix } from "node:path";
 import type { Context, SourceFile } from "./types.ts";
 
-const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", ".nuxt", ".output", "vendor", "coverage", ".turbo", ".vercel", ".netlify", ".venv", "target"]);
-const MAX_BYTES = 1024 * 1024;
-const MAX_FILES = 20000;
+export const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", ".nuxt", ".output", "vendor", "coverage", ".turbo", ".vercel", ".netlify", ".venv", "target"]);
+export const MAX_BYTES = 1024 * 1024;
+export const MAX_FILES = 20000;
 
 const AGENT_DOCS = new Set(["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".cursorrules", ".windsurfrules", ".clinerules", "copilot-instructions.md"]);
 const CI_OTHER = new Set(["bitbucket-pipelines.yml", "azure-pipelines.yml"]);
 
 export function classify(path: string): SourceFile["kind"] | undefined {
-  const name = posix.basename(path);
-  const dir = posix.dirname(path);
+  const slash = path.lastIndexOf("/");
+  const name = path.slice(slash + 1);
+  const dir = slash === -1 ? "." : path.slice(0, slash);
   if (/(^|\/)\.github\/workflows$/.test(dir) && /\.ya?ml$/.test(name)) return "workflow";
   if (/(^|\/)\.github\/actions(\/|$)/.test(dir) && /^action\.ya?ml$/.test(name)) return "workflow";
   if (name === ".gitlab-ci.yml" || /\.gitlab-ci\.ya?ml$/.test(name)) return "gitlab";
@@ -35,37 +34,6 @@ export interface Repo {
   /** Every path walked (including files that aren't read), relative, forward slashes. */
   paths: string[];
   truncated: boolean;
-}
-
-export function loadRepo(root: string): Repo {
-  const files: SourceFile[] = [];
-  const paths: string[] = [];
-  let truncated = false;
-  const walk = (dir: string, rel: string) => {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (paths.length >= MAX_FILES) { truncated = true; return; }
-      const relPath = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) {
-        if (!SKIP_DIRS.has(e.name)) walk(join(dir, e.name), relPath);
-        continue;
-      }
-      if (!e.isFile()) continue;
-      paths.push(relPath);
-      const kind = classify(relPath);
-      if (!kind) continue;
-      const full = join(dir, e.name);
-      if (statSync(full).size > MAX_BYTES) continue;
-      files.push({ path: relPath, text: readFileSync(full, "utf8"), kind });
-    }
-  };
-  walk(root, "");
-  return { root, files, paths, truncated };
 }
 
 /** A span of a file that holds shell code, and how that code runs. */

@@ -1,6 +1,6 @@
 {
   "name": "supabase-cli-v3-upgrade",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Finds Supabase CLI v2 usage that breaks on CLI v3 in CI workflows, scripts, config.toml and agent instructions, and rewrites the safe cases with --fix.",
   "type": "module",
